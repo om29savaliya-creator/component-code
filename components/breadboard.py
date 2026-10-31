@@ -1,86 +1,176 @@
-class PowerRail:
-    def __init__(self, total_ports=25):
-        self.total_ports = total_ports
-        self.voltage = 0.0          # શરુઆતમાં બોર્ડ બંધ છે એટલે 0V
-        self.supply_port = None     # કયા પોર્ટમાં સપ્લાય લાગ્યો તે યાદ રાખવા
-
-    def connect_supply(self, port_no, voltage):
-        # User 0 થી 24 માંથી ગમે તે પોર્ટમાં પાવર સપ્લાય જોડી શકે છે
-        if 0 <= port_no < self.total_ports:
-            self.voltage = voltage
-            self.supply_port = port_no
-        else:
-            print(f"Error: Port {port_no} ખોટો છે. (0 થી {self.total_ports - 1} હોવો જોઈએ)")
-
-    def get_voltage_from(self, port_no):
-        #User બાકીના કોઈપણ પોર્ટમાંથી પાવર લઈ શકે છે
-        if port_no == self.supply_port:
-            print(f"Port {port_no} પહેલેથી સપ્લાય માટે રોકાયેલો છે")
-        elif 0 <= port_no < self.total_ports:
-            return self.voltage
-        else:
-            print(f"Error: Port {port_no} અસ્તિત્વમાં નથી!")
-            return 0.0
+# =============================================================================
+# breadboard.py  —  Layer 1: Connectivity Model
+# =============================================================================
+# Defines the physical structure and node connectivity of the breadboard.
+# This layer answers ONE question only:
+#   "Which physical pins are electrically connected to which node?"
+#
+# NO voltage, NO current, NO component logic lives here.
+# Voltage is computed by the Circuit Solver (solver.py — Layer 3).
+# =============================================================================
 
 
-rail1 = PowerRail()
-rail2 = PowerRail()
-rail3 = PowerRail()
-rail4 = PowerRail() 
+class Node:
+    """
+    Represents a single electrical node on the breadboard.
+    A node is any group of points directly connected together (zero resistance).
+    Tracks which physical holes are occupied (have a wire/leg plugged in).
+    """
 
+    def __init__(self, node_id):
+        self.node_id = node_id
+        self.occupied_pins = set()      # physical holes currently in use
 
-class TerminalRow:
-    VALID_PINS = ['A', 'B', 'C', 'D', 'E']
-
-    def __init__(self, row_no):
-        self.row_no = row_no
-        self.voltage = 0.0
-        self.supply_pin = None
-
-    def connect_supply(self, pin, voltage):
-        pin = str(pin).upper()
-
-        if pin not in self.VALID_PINS:
-            print(f"Error: Row {self.row_no} - Invalid pin '{pin}'. Valid pins are A, B, C, D, E.")
+    def occupy(self, pin_label):
+        """Mark a hole as physically occupied (wire or component leg plugged in)."""
+        if pin_label in self.occupied_pins:
+            print(f"Error: Pin '{pin_label}' on node '{self.node_id}' is already occupied.")
             return False
-
-        if pin == self.supply_pin:
-            print(f"Error: Row {self.row_no} - Pin '{pin}' is already connected to the power supply.")
-            return False
-
-        self.voltage = voltage
-        self.supply_pin = pin
+        self.occupied_pins.add(pin_label)
         return True
 
-    def get_voltage_from(self, pin):
-        pin = str(pin).upper()
+    def free(self, pin_label):
+        """Free a hole (wire or component leg removed)."""
+        self.occupied_pins.discard(pin_label)
 
-        if pin not in self.VALID_PINS:
-            print(f"Error: Row {self.row_no} - Pin '{pin}' does not exist.")
+    def is_occupied(self, pin_label):
+        """Check if a specific hole is currently occupied."""
+        return pin_label in self.occupied_pins
+
+    def __repr__(self):
+        return f"Node(id='{self.node_id}', occupied={self.occupied_pins})"
+
+
+# =============================================================================
+
+class PowerRail:
+    """
+    Represents a power rail — the long +/- strips on the sides of the breadboard.
+    The entire rail is ONE electrical node (all ports are shorted together).
+    Stores NO voltage — voltage is assigned externally by the Circuit Solver.
+    """
+
+    TOTAL_PORTS = 25
+
+    def __init__(self, rail_id):
+        self.rail_id = rail_id
+        self.node = Node(node_id=f"rail_{rail_id}")
+
+    def plug_in(self, port_no):
+        """
+        Physically occupy a port (plug a wire or component leg into this rail).
+        Returns the Node this port belongs to, or None on error.
+        """
+        if not (0 <= port_no < self.TOTAL_PORTS):
+            print(f"Error: Rail '{self.rail_id}' - Port {port_no} invalid. Valid: 0 to {self.TOTAL_PORTS - 1}.")
             return None
+        success = self.node.occupy(port_no)
+        return self.node if success else None
 
-        if pin == self.supply_pin:
-            print(f"Error: Row {self.row_no} - Pin '{pin}' is already occupied by the supply.")
+    def unplug(self, port_no):
+        """Free a port (remove wire or component leg from this rail)."""
+        self.node.free(port_no)
+
+    def get_node(self):
+        """Return the electrical node this entire rail represents."""
+        return self.node
+
+    def __repr__(self):
+        return f"PowerRail(id='{self.rail_id}', node={self.node})"
+
+
+# =============================================================================
+
+class Breadboard:
+    """
+    Represents the main working area of the breadboard.
+    Maps pin IDs like '3C' or '14A' to their electrical nodes (rows).
+
+    Physical rule:
+        All 5 pins in a row (A, B, C, D, E) belong to the SAME node.
+        '3A', '3B', '3C', '3D', '3E' → all same node → row_3
+
+    This class stores NO voltage — it is a pure connectivity model.
+    """
+
+    VALID_PINS = ['A', 'B', 'C', 'D', 'E']
+    TOTAL_ROWS = 30
+
+    def __init__(self):
+        # Each row is an independent electrical node
+        self.nodes = {
+            r: Node(node_id=f"row_{r}")
+            for r in range(1, self.TOTAL_ROWS + 1)
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helper
+    # ------------------------------------------------------------------
+
+    def _parse_pin_id(self, pin_id):
+        """
+        Parse a pin ID string like '4C' into (row=4, pin='C').
+        Returns (None, None) if the pin ID is invalid.
+        """
+        pin_id = str(pin_id).strip().upper()
+        letter   = pin_id[-1]       # last character  → pin letter
+        row_part = pin_id[:-1]      # everything else → row number
+
+        if not row_part.isdigit():
+            print(f"Error: '{pin_id}' — '{row_part}' is not a valid row number.")
+            return None, None
+
+        row = int(row_part)
+
+        if row not in self.nodes:
+            print(f"Error: Row {row} does not exist. Valid rows: 1 to {self.TOTAL_ROWS}.")
+            return None, None
+
+        if letter not in self.VALID_PINS:
+            print(f"Error: '{pin_id}' — '{letter}' is not a valid pin. Valid: A, B, C, D, E.")
+            return None, None
+
+        return row, letter
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def plug_in(self, pin_id):
+        """
+        Physically occupy a pin hole (plug a wire or component leg in).
+        Returns the Node this pin belongs to, or None on failure.
+        """
+        row, pin = self._parse_pin_id(pin_id)
+        if row is None:
             return None
+        node = self.nodes[row]
+        success = node.occupy(pin)
+        return node if success else None
 
-        return self.voltage
+    def unplug(self, pin_id):
+        """Free a pin hole (remove a wire or component leg)."""
+        row, pin = self._parse_pin_id(pin_id)
+        if row is None:
+            return
+        self.nodes[row].free(pin)
 
+    def get_node(self, pin_id):
+        """
+        Return the electrical Node that this pin ID belongs to.
+        Used by the Circuit Solver to build the network.
+        """
+        row, pin = self._parse_pin_id(pin_id)
+        if row is None:
+            return None
+        return self.nodes[row]
 
-class WorkingBoard:
-    def __init__(self, total_rows=30):
-        self.total_rows = total_rows
-        self.rows = {r: TerminalRow(row_no=r) for r in range(1, total_rows + 1)}
-
-    def connect_supply(self, row, pin, voltage):
-        if 1 <= row <= self.total_rows:
-            return self.rows[row].connect_supply(pin, voltage)
-        else:
-            print(f"Error: Row {row} does not exist. Valid rows are 1 to {self.total_rows}.")
+    def is_occupied(self, pin_id):
+        """Check whether a specific pin hole is physically occupied."""
+        row, pin = self._parse_pin_id(pin_id)
+        if row is None:
             return False
+        return self.nodes[row].is_occupied(pin)
 
-    def get_voltage_from(self, row, pin):
-        if 1 <= row <= self.total_rows:
-            return self.rows[row].get_voltage_from(pin)
-        else:
-            print(f"Error: Row {row} does not exist. Valid rows are 1 to {self.total_rows}.")
-            return None
+    def __repr__(self):
+        return f"Breadboard(rows={self.TOTAL_ROWS}, valid_pins={self.VALID_PINS})"
