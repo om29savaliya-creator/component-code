@@ -43,7 +43,53 @@ class Node:
 
 # =============================================================================
 
-class PowerRail:
+class ConnectionZone:
+    """
+    Base class for any connectable area (Breadboard, PowerRail, etc.).
+    Centralizes common plug, unplug, query, and lookup operations.
+    Subclasses only need to implement `_resolve(target)` to map an input
+    address (such as '3C' or port 0) to a (Node, pin_label) pair.
+    """
+
+    def _resolve(self, target):
+        """
+        Translates a physical address into (Node, pin_label).
+        Must be implemented by subclasses. Returns (None, None) on validation failure.
+        """
+        raise NotImplementedError("Subclasses must implement _resolve()")
+
+    def plug_in(self, target):
+        """
+        Physically occupy a pin hole or port.
+        Returns the Node this connection belongs to, or None on failure.
+        """
+        node, label = self._resolve(target)
+        if node is None:
+            return None
+        return node if node.occupy(label) else None
+
+    def unplug(self, target):
+        """Free a pin hole or port."""
+        node, label = self._resolve(target)
+        if node is not None:
+            node.free(label)
+
+    def is_occupied(self, target):
+        """Check whether a specific hole or port is occupied."""
+        node, label = self._resolve(target)
+        if node is None:
+            return False
+        return node.is_occupied(label)
+
+    def get_node(self, target):
+        """Return the electrical Node that this target address connects to."""
+        node, _ = self._resolve(target)
+        return node
+
+
+# =============================================================================
+
+class PowerRail(ConnectionZone):
     """
     Represents a power rail — the long +/- strips on the sides of the breadboard.
     The entire rail is ONE electrical node (all ports are shorted together).
@@ -56,24 +102,12 @@ class PowerRail:
         self.rail_id = rail_id
         self.node = Node(node_id=f"rail_{rail_id}")
 
-    def plug_in(self, port_no):
-        """
-        Physically occupy a port (plug a wire or component leg into this rail).
-        Returns the Node this port belongs to, or None on error.
-        """
+    def _resolve(self, port_no):
+        """Maps a port number (0 to 24) to the rail's single Node."""
         if not (0 <= port_no < self.TOTAL_PORTS):
             print(f"Error: Rail '{self.rail_id}' - Port {port_no} invalid. Valid: 0 to {self.TOTAL_PORTS - 1}.")
-            return None
-        success = self.node.occupy(port_no)
-        return self.node if success else None
-
-    def unplug(self, port_no):
-        """Free a port (remove wire or component leg from this rail)."""
-        self.node.free(port_no)
-
-    def get_node(self):
-        """Return the electrical node this entire rail represents."""
-        return self.node
+            return None, None
+        return self.node, port_no
 
     def __repr__(self):
         return f"PowerRail(id='{self.rail_id}', node={self.node})"
@@ -81,7 +115,7 @@ class PowerRail:
 
 # =============================================================================
 
-class Breadboard:
+class Breadboard(ConnectionZone):
     """
     Represents the main working area of the breadboard.
     Maps pin IDs like '3C' or '14A' to their electrical nodes (rows).
@@ -103,17 +137,13 @@ class Breadboard:
             for r in range(1, self.TOTAL_ROWS + 1)
         }
 
-    # ------------------------------------------------------------------
-    # Internal helper
-    # ------------------------------------------------------------------
-
-    def _parse_pin_id(self, pin_id):
+    def _resolve(self, pin_id):
         """
-        Parse a pin ID string like '4C' into (row=4, pin='C').
-        Returns (None, None) if the pin ID is invalid.
+        Parses and validates a pin ID string like '4C' into (Node, pin_letter).
+        Returns (None, None) if the address is invalid.
         """
         pin_id = str(pin_id).strip().upper()
-        letter   = pin_id[-1]       # last character  → pin letter
+        letter = pin_id[-1]         # last character  → pin letter
         row_part = pin_id[:-1]      # everything else → row number
 
         if not row_part.isdigit():
@@ -130,47 +160,7 @@ class Breadboard:
             print(f"Error: '{pin_id}' — '{letter}' is not a valid pin. Valid: A, B, C, D, E.")
             return None, None
 
-        return row, letter
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def plug_in(self, pin_id):
-        """
-        Physically occupy a pin hole (plug a wire or component leg in).
-        Returns the Node this pin belongs to, or None on failure.
-        """
-        row, pin = self._parse_pin_id(pin_id)
-        if row is None:
-            return None
-        node = self.nodes[row]
-        success = node.occupy(pin)
-        return node if success else None
-
-    def unplug(self, pin_id):
-        """Free a pin hole (remove a wire or component leg)."""
-        row, pin = self._parse_pin_id(pin_id)
-        if row is None:
-            return
-        self.nodes[row].free(pin)
-
-    def get_node(self, pin_id):
-        """
-        Return the electrical Node that this pin ID belongs to.
-        Used by the Circuit Solver to build the network.
-        """
-        row, pin = self._parse_pin_id(pin_id)
-        if row is None:
-            return None
-        return self.nodes[row]
-
-    def is_occupied(self, pin_id):
-        """Check whether a specific pin hole is physically occupied."""
-        row, pin = self._parse_pin_id(pin_id)
-        if row is None:
-            return False
-        return self.nodes[row].is_occupied(pin)
+        return self.nodes[row], letter
 
     def __repr__(self):
         return f"Breadboard(rows={self.TOTAL_ROWS}, valid_pins={self.VALID_PINS})"
